@@ -1,0 +1,8 @@
+Place the 'tests' folder, 'requirements-dev.txt', 'ruff.toml', 'mypy.ini', and '.github/workflows/ci.yml'
+into your repo root.
+
+Local dev extras:
+  pip install -r requirements-dev.txt
+  ruff check .
+  mypy app
+  pytest -q
