@@ -1,10 +1,7 @@
-import logging
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.requests import Request
-from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from .db import Base, engine
@@ -28,9 +25,9 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-#debug exception handler (turn off if not needed)
-#@app.exception_handler(Exception)
-#async def _debug_exceptions(request: Request, exc: Exception):
+# debug exception handler (turn off if not needed)
+# @app.exception_handler(Exception)
+# async def _debug_exceptions(request: Request, exc: Exception):
 #    # Print the full traceback to the console
 #    logging.exception("Unhandled error on %s %s", request.method, request.url.path)
 #    return JSONResponse(

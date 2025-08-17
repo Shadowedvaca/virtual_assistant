@@ -4,18 +4,27 @@ from collections.abc import Sequence
 from datetime import UTC, datetime
 from typing import Literal
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from .. import crud
 from ..db import get_session
-from ..models import Task
+from ..models import Task, TaskStatus
+from ..schemas import TaskCreate
 from ..utils.ids import suggestion_id
 from ..utils.similarity import cosine_similarity
 from ..utils.text import split_phrases, tokenize
 
 router = APIRouter()
+
+
+class ApplyIn(BaseModel):
+    id: str
+    type: Literal["combine", "split"]
+    task_ids: list[int] | None = None
+    task_id: int | None = None
+    chosen_subtasks: list[str] | None = None
 
 
 class CombineSuggestion(BaseModel):
@@ -116,6 +125,120 @@ def _merge_interleaved(combine: Sequence[Suggestion], split: Sequence[Suggestion
     return merged
 
 
+def _uniq_union(a: list[str] | None, b: list[str] | None) -> list[str]:
+    if not a and not b:
+        return []
+    a = a or []
+    b = b or []
+    # preserve order, remove dups
+    return list(dict.fromkeys(a + b))
+
+
+def _better_priority(p: str | None, q: str | None) -> str | None:
+    # P0 is highest; keep the better (lower number)
+    def score(x):
+        if not x:
+            return 999
+        try:
+            return int(x[1:])
+        except Exception:
+            return 999
+
+    return p if score(p) <= score(q) else q
+
+
+async def _apply_combine(db: AsyncSession, a_id: int, b_id: int, sid: str) -> dict:
+    a = await crud.get_task(db, a_id)
+    b = await crud.get_task(db, b_id)
+    if not a or not b:
+        raise HTTPException(404, "One or both tasks not found")
+
+    # Keep the shorter title as the primary (heuristic mirrors suggestion title)
+    primary, secondary = (a, b) if len(a.title or "") <= len(b.title or "") else (b, a)
+
+    # Merge simple fields
+    primary.context = _uniq_union(primary.context, secondary.context)
+    primary.people = _uniq_union(primary.people, secondary.people)
+    primary.links = _uniq_union(primary.links, secondary.links)
+    primary.priority = _better_priority(primary.priority, secondary.priority) or primary.priority
+    if not primary.project and secondary.project:
+        primary.project = secondary.project
+    if secondary.due and (not primary.due or secondary.due < primary.due):
+        primary.due = secondary.due
+
+    # Notes & history
+    merge_note = f"Merged #{secondary.id}: {secondary.title}"
+    primary.notes = f"{primary.notes}\n\n{merge_note}" if primary.notes else merge_note
+
+    entry = {
+        "event": "suggestion_apply",
+        "id": sid,
+        "type": "combine",
+        "accepted": True,
+        "timestamp": datetime.utcnow().isoformat() + "Z",
+        "merged": [primary.id, secondary.id],
+    }
+    for t in (primary, secondary):
+        hist = t.history or []
+        hist.append(entry)
+        t.history = hist
+
+    # Mark secondary done and point it to primary for traceability
+    secondary.status = TaskStatus.done
+    secondary.parent_id = primary.id
+
+    await db.commit()
+    await db.refresh(primary)
+    await db.refresh(secondary)
+    return {"primary_id": primary.id, "secondary_id": secondary.id}
+
+
+async def _apply_split(db: AsyncSession, task_id: int, subtasks: list[str], sid: str) -> dict:
+    parent = await crud.get_task(db, task_id)
+    if not parent:
+        raise HTTPException(404, "Task not found")
+
+    if not subtasks:
+        raise HTTPException(400, "No subtasks provided")
+
+    created_ids: list[int] = []
+    for title in subtasks:
+        child = TaskCreate(
+            title=title,
+            notes=None,
+            channel=parent.channel,
+            due=parent.due,
+            recurrence=None,
+            priority=parent.priority,
+            project=parent.project,
+            context=parent.context,
+            people=parent.people,
+            links=parent.links,
+            status=TaskStatus.inbox,  # if schemas.TaskCreate expects TaskStatus
+            estimated_minutes=None,
+            parent_id=parent.id,
+        )
+        t = await crud.create_task(db, child)
+        created_ids.append(t.id)
+
+    # History on parent
+    entry = {
+        "event": "suggestion_apply",
+        "id": sid,
+        "type": "split",
+        "accepted": True,
+        "timestamp": datetime.utcnow().isoformat() + "Z",
+        "children": created_ids,
+    }
+    hist = parent.history or []
+    hist.append(entry)
+    parent.history = hist
+
+    await db.commit()
+    await db.refresh(parent)
+    return {"parent_id": parent.id, "children": created_ids}
+
+
 @router.get("", response_model=list[Suggestion])
 async def get_suggestions(
     threshold: float = Query(0.45, ge=0.0, le=1.0, description="Cosine similarity threshold for combine suggestions"),
@@ -183,3 +306,24 @@ async def submit_feedback(payload: FeedbackIn, db: AsyncSession = Depends(get_se
         await db.commit()
 
     return {"ok": True, "touched": touched}
+
+
+@router.post("/apply")
+async def apply_suggestion(payload: ApplyIn, db: AsyncSession = Depends(get_session)):
+    if payload.type == "combine":
+        if not payload.task_ids or len(payload.task_ids) != 2:
+            raise HTTPException(400, "combine requires exactly two task_ids")
+        result = await _apply_combine(db, payload.task_ids[0], payload.task_ids[1], payload.id)
+        return {"ok": True, "result": result}
+
+    if payload.type == "split":
+        subs = (payload.chosen_subtasks or []).copy()
+        if not subs and payload.task_id is not None:
+            # fall back to what the suggestion proposed by recomputing once (optional)
+            pass
+        if payload.task_id is None:
+            raise HTTPException(400, "split requires task_id")
+        result = await _apply_split(db, payload.task_id, subs, payload.id)
+        return {"ok": True, "result": result}
+
+    raise HTTPException(400, "Unknown suggestion type")
