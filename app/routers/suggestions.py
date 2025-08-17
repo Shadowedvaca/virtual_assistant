@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Sequence
 from datetime import UTC, datetime
 from typing import Literal
 
@@ -100,7 +101,7 @@ def _clamp01(x: float) -> float:
     return max(0.0, min(1.0, round(x, 12)))
 
 
-def _merge_interleaved(combine: list[Suggestion], split: list[Suggestion], top_k: int) -> list[Suggestion]:
+def _merge_interleaved(combine: Sequence[Suggestion], split: Sequence[Suggestion], top_k: int) -> list[Suggestion]:
     merged: list[Suggestion] = []
     i = j = 0
     while len(merged) < top_k and (i < len(combine) or j < len(split)):

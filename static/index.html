@@ -1,0 +1,279 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>Virtual Assistant — Tasks</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <!-- Nice defaults with no build tools -->
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600&display=swap" rel="stylesheet">
+  <script defer src="https://unpkg.com/htmx.org@1.9.12"></script>
+  <style>
+    :root { --bg:#0b0c0f; --muted:#20242b; --card:#151922; --text:#e6e8eb; --sub:#aab1ba; --accent:#84d993; --danger:#ff6b6b; --warn:#ffd166; --link:#8ab4f8 }
+    * { box-sizing: border-box; }
+    body { margin: 0; background: var(--bg); color: var(--text); font-family: Inter, system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif; }
+    .wrap { max-width: 980px; margin: 32px auto; padding: 0 16px; }
+    header { display:flex; align-items:center; justify-content:space-between; gap:16px; margin-bottom:20px; }
+    h1 { font-size: 22px; margin:0; }
+    .card { background: var(--card); border: 1px solid var(--muted); border-radius: 14px; padding: 14px; }
+    .row { display:flex; gap:10px; align-items:center; }
+    input[type="text"]{ flex:1; background:#11141a; color:var(--text); border:1px solid var(--muted); border-radius:12px; padding:12px 14px; outline:none; }
+    input[type="text"]::placeholder{ color:#717784; }
+    button{ background:#1f2733; color:var(--text); border:1px solid var(--muted); border-radius:12px; padding:10px 14px; cursor:pointer; }
+    button.primary{ background: var(--accent); color:#0a0a0a; border-color: #1f5130; font-weight:600; }
+    button.ghost{ background:transparent }
+    button.bad{ background: var(--danger); color:#0a0a0a; border-color:#7a2e2e; }
+    button:disabled{ opacity:.6; cursor: not-allowed; }
+    .toolbar{ display:flex; gap:8px; align-items:center; flex-wrap:wrap; }
+    .chip{ padding:6px 10px; border:1px solid var(--muted); border-radius:999px; background:#121620; cursor:pointer; }
+    .chip.active{ border-color: var(--accent); }
+    .list{ margin-top:14px }
+    .item{ display:grid; grid-template-columns: 28px 1fr auto; gap:10px; align-items:center; padding:10px; border-bottom:1px dashed #262a33; }
+    .title{ padding:8px 10px; border-radius:8px; }
+    .title[contenteditable="true"]{ outline:1px dashed #3b4350; background:#0f131b; }
+    .sub{ color: var(--sub); font-size:12px; }
+    .right{ display:flex; gap:6px; align-items:center; }
+    .pill{ font-size:12px; padding:4px 8px; border-radius:999px; background:#10131a; border:1px solid var(--muted); }
+    .pill.warn{ border-color:#6d5a29; color:#ffd166 }
+    .pill.done{ border-color:#2e5a3a; color:#84d993 }
+    .section-title{ margin:18px 0 8px; font-size:14px; color:#c7ccd4 }
+    a { color: var(--link); text-decoration: none; }
+    .suggestion{ display:flex; gap:12px; justify-content:space-between; align-items:center; padding:10px; border-bottom:1px dashed #262a33; }
+    .muted{ color:#8a929e }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <header>
+      <h1>🗂️ Virtual Assistant — Tasks</h1>
+      <div class="sub">API <a href="/docs" target="_blank">Docs</a></div>
+    </header>
+
+    <!-- Quick add -->
+    <div class="card">
+      <form id="quickForm" class="row" onsubmit="return addQuickTask(event)">
+        <input id="quickInput" type="text" placeholder="Type a task… e.g. “Email Joel re SOW tomorrow 4pm #Acme @email +Joel p1”" autofocus />
+        <button class="primary" id="addBtn" type="submit">Add</button>
+      </form>
+      <div class="sub" style="margin-top:8px">Supported: due date phrases, <code>#project</code>, <code>@context</code>, <code>+person</code>, <code>p0..p3</code></div>
+    </div>
+
+    <!-- Filters / search -->
+    <div class="row" style="margin-top:14px">
+      <div class="card" style="flex:1">
+        <div class="toolbar">
+          <span class="chip active" data-status="all" onclick="setFilter(this)">All</span>
+          <span class="chip" data-status="inbox" onclick="setFilter(this)">Inbox</span>
+          <span class="chip" data-status="planned" onclick="setFilter(this)">Planned</span>
+          <span class="chip" data-status="in_progress" onclick="setFilter(this)">In Progress</span>
+          <span class="chip" data-status="done" onclick="setFilter(this)">Done</span>
+          <span class="chip" data-status="delegated" onclick="setFilter(this)">Delegated</span>
+          <span style="margin-left:auto"></span>
+          <input id="searchBox" type="text" placeholder="Filter by text…" oninput="render()" style="max-width:260px">
+        </div>
+      </div>
+    </div>
+
+    <!-- Task list -->
+    <div class="card list" id="taskList"></div>
+
+    <!-- Suggestions -->
+    <div class="section-title">Suggestions</div>
+    <div class="card" id="sugList">
+      <div class="muted">Fetching suggestions…</div>
+    </div>
+  </div>
+
+  <script>
+    const API = ""; // same origin
+    const state = { tasks: [], filter: 'all', loading: false, suggestions: [] };
+
+    document.addEventListener('keydown', (e) => {
+      if (e.key === '/' && document.activeElement.tagName !== 'INPUT' && document.activeElement.getAttribute('contenteditable') !== 'true') {
+        e.preventDefault(); document.getElementById('searchBox').focus();
+      }
+    });
+
+    async function addQuickTask(ev){
+      ev.preventDefault();
+      const input = document.getElementById('quickInput');
+      const btn = document.getElementById('addBtn');
+      const text = input.value.trim();
+      if(!text) return false;
+      btn.disabled = true;
+      try{
+        await fetch(API + '/ingest', {
+          method:'POST',
+          headers:{'Content-Type':'application/json'},
+          body: JSON.stringify({ text, channel: 'ui' })
+        }).then(r => r.ok ? r.json() : Promise.reject(r));
+        input.value = "";
+        await refresh();
+      }catch(err){
+        alert('Failed to add task');
+      }finally{
+        btn.disabled = false;
+      }
+      return false;
+    }
+
+    function setFilter(el){
+      document.querySelectorAll('.chip').forEach(c => c.classList.remove('active'));
+      el.classList.add('active');
+      state.filter = el.dataset.status;
+      render();
+    }
+
+    function matchesFilter(t){
+      if(state.filter === 'all') return true;
+      return t.status === state.filter;
+    }
+
+    function matchesSearch(t){
+      const q = document.getElementById('searchBox').value.trim().toLowerCase();
+      if(!q) return true;
+      const fields = [t.title, t.project, (t.context||[]).join(' '), (t.people||[]).join(' '), t.notes].filter(Boolean).join(' ').toLowerCase();
+      return fields.includes(q);
+    }
+
+    function fmtDate(iso){
+      if(!iso) return '';
+      const d = new Date(iso);
+      return d.toLocaleString();
+    }
+
+    function pillFor(t){
+      const pills = [];
+      if(t.priority) pills.push(`<span class="pill warn">${t.priority}</span>`);
+      if(t.project) pills.push(`<span class="pill">#${t.project}</span>`);
+      if(t.context && t.context.length) pills.push(`<span class="pill">@${t.context.join(', ')}</span>`);
+      return pills.join(' ');
+    }
+
+    async function toggleDone(t){
+      const newStatus = t.status === 'done' ? 'inbox' : 'done';
+      await fetch(API + `/tasks/${t.id}`, {
+        method:'PATCH',
+        headers:{'Content-Type':'application/json'},
+        body: JSON.stringify({ status: newStatus })
+      });
+      await refresh();
+    }
+
+    async function saveTitle(t, newTitle){
+      if(newTitle.trim() === t.title) return;
+      await fetch(API + `/tasks/${t.id}`, {
+        method:'PATCH',
+        headers:{'Content-Type':'application/json'},
+        body: JSON.stringify({ title: newTitle.trim() })
+      });
+      await refresh();
+    }
+
+    async function removeTask(tid){
+      if(!confirm('Delete this task?')) return;
+      await fetch(API + `/tasks/${tid}`, { method:'DELETE' });
+      await refresh();
+    }
+
+    function render(){
+      const list = document.getElementById('taskList');
+      const items = state.tasks.filter(matchesFilter).filter(matchesSearch);
+      if(!items.length){
+        list.innerHTML = `<div class="muted" style="padding:10px">No tasks match.</div>`;
+        return;
+      }
+      list.innerHTML = items.map(t => {
+        const due = fmtDate(t.due);
+        return `
+          <div class="item">
+            <input type="checkbox" ${t.status==='done'?'checked':''} onchange="toggleDone(${encodeURIComponent(JSON.stringify(t))})">
+            <div>
+              <div class="row" style="gap:8px">
+                <div class="title" contenteditable="true" onkeydown="if(event.key==='Enter'){event.preventDefault(); this.blur();}" onblur="saveTitle(${encodeURIComponent(JSON.stringify(t))}, this.innerText)">${t.title}</div>
+                ${pillFor(t)}
+              </div>
+              <div class="sub">
+                ${due ? `Due: ${due} • ` : ''}Status: ${t.status}${t.channel ? ` • ${t.channel}`:''}
+              </div>
+            </div>
+            <div class="right">
+              <button class="ghost" onclick="removeTask(${t.id})">Delete</button>
+            </div>
+          </div>
+        `;
+      }).join('');
+    }
+
+    async function refresh(){
+      state.loading = true;
+      try{
+        const res = await fetch(API + '/tasks');
+        state.tasks = await res.json();
+        render();
+        await fetchSuggestions();
+      } finally {
+        state.loading = false;
+      }
+    }
+
+    async function fetchSuggestions(){
+      const box = document.getElementById('sugList');
+      box.innerHTML = `<div class="muted">Fetching suggestions…</div>`;
+      try{
+        const r = await fetch(API + '/suggestions?threshold=0.35&top_k=6&include_split=true');
+        const data = await r.json();
+        state.suggestions = data;
+        if(!data.length){
+          box.innerHTML = `<div class="muted">No suggestions right now.</div>`;
+          return;
+        }
+        box.innerHTML = data.map(s => {
+          if(s.type === 'combine'){
+            return `
+              <div class="suggestion">
+                <div>
+                  <div><strong>Combine</strong> — ${s.title}</div>
+                  <div class="sub">Tasks: ${s.task_ids.join(', ')} • score ${s.score.toFixed(2)}</div>
+                </div>
+                <div class="right">
+                  <button onclick="sendFeedback('${s.id}','combine',true, ${JSON.stringify(s.task_ids)})" class="primary">Accept</button>
+                  <button onclick="sendFeedback('${s.id}','combine',false, ${JSON.stringify(s.task_ids)})">Decline</button>
+                </div>
+              </div>`;
+          } else {
+            return `
+              <div class="suggestion">
+                <div>
+                  <div><strong>Split</strong> — Task #${s.task_id}</div>
+                  <div class="sub">Subtasks: ${s.subtasks.join(' • ')} • score ${s.score.toFixed(2)}</div>
+                </div>
+                <div class="right">
+                  <button onclick="sendFeedback('${s.id}','split',true, [], ${s.task_id})" class="primary">Accept</button>
+                  <button onclick="sendFeedback('${s.id}','split',false, [], ${s.task_id})">Decline</button>
+                </div>
+              </div>`;
+          }
+        }).join('');
+      }catch(e){
+        box.innerHTML = `<div class="muted">Could not load suggestions.</div>`;
+      }
+    }
+
+    async function sendFeedback(id, type, accepted, taskIds=[], taskId=null){
+      const payload = { id, type, accepted };
+      if(type==='combine') payload.task_ids = taskIds;
+      if(type==='split') payload.task_id = taskId;
+      await fetch(API + '/suggestions/feedback', {
+        method:'POST', headers:{'Content-Type':'application/json'},
+        body: JSON.stringify(payload)
+      });
+      await fetchSuggestions();
+      await refresh(); // to see history update if you open /tasks/{id} via API
+    }
+
+    // initial
+    refresh();
+  </script>
+</body>
+</html>

@@ -1,3 +1,5 @@
+from datetime import UTC
+
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -5,8 +7,19 @@ from .models import Task, TaskStatus
 from .schemas import TaskCreate, TaskUpdate
 
 
+def _normalize_due(dt):
+    if dt is None:
+        return None
+    # If tz-aware, convert to UTC and drop tzinfo (store naive UTC)
+    if getattr(dt, "tzinfo", None) is not None:
+        return dt.astimezone(UTC).replace(tzinfo=None)
+    return dt
+
+
 async def create_task(db: AsyncSession, payload: TaskCreate) -> Task:
-    task = Task(**payload.model_dump())
+    data = payload.model_dump()
+    data["due"] = _normalize_due(data.get("due"))
+    task = Task(**data)
     db.add(task)
     await db.commit()
     await db.refresh(task)
@@ -27,11 +40,14 @@ async def list_tasks(db: AsyncSession, status: str | None = None, limit: int = 1
     return list(res.scalars().all())
 
 
-async def update_task(db: AsyncSession, task_id: int, payload: TaskUpdate) -> Task | None:
+async def update_task(db: AsyncSession, task_id: int, payload: TaskUpdate):
     task = await get_task(db, task_id)
     if not task:
         return None
-    for k, v in payload.model_dump(exclude_unset=True).items():
+    updates = payload.model_dump(exclude_unset=True)
+    if "due" in updates:
+        updates["due"] = _normalize_due(updates["due"])
+    for k, v in updates.items():
         setattr(task, k, v)
     await db.commit()
     await db.refresh(task)
