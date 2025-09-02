@@ -1,0 +1,16 @@
+services:
+  app:
+    image: ghcr.io/shadowedvaca/virtual_assistant:{{TAG}}
+    restart: unless-stopped
+    environment:
+      - ENV=prod
+    expose:
+      - "8000"
+    networks:
+      - web
+    volumes:
+      - ./data:/data
+
+networks:
+  web:
+    external: true
